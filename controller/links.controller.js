@@ -1,4 +1,5 @@
 import Link from "../models/Links.js";
+import client from "../config/redisClient.js";
 
 // Generate short code (6 chars) — returns alphanumeric
 function generateCode() {
@@ -71,28 +72,57 @@ export const deleteLink = async (req, res) => {
 
     const link = await Link.findOneAndDelete({ code });
 
+    await client.del(`url:${code}`);
+
     if (!link) return res.status(404).json({ error: "Not found" });
 
     res.json({ message: "Link deleted" });
 };
 
-// Redirect Handler
 export const redirectLink = async (req, res) => {
     try {
         const { code } = req.params;
 
+        const cacheKey = `url:${code}`;
+
+        // 🔥 1. Check Redis first
+        const cachedUrl = await client.get(cacheKey);
+
+        if (cachedUrl) {
+            console.log("Cache HIT ✅");
+
+            // clicks update (important)
+            await Link.updateOne(
+                { code },
+                {
+                    $inc: { clicks: 1 },
+                    $set: { lastClicked: new Date() }
+                }
+            );
+
+            return res.redirect(cachedUrl);
+        }
+
+        console.log("Cache MISS ❌");
+
+        // 🔥 2. DB call
         const link = await Link.findOne({ code });
 
         if (!link) {
             return res.status(404).json({ message: "Link not found" });
         }
 
-        // UPDATE CLICKS & LAST CLICKED
+        // 🔥 3. Store in Redis
+        await client.set(cacheKey, link.longUrl, {
+            EX: 120 // 1 hour
+        });
+
+        // 🔥 4. Update clicks
         link.clicks += 1;
         link.lastClicked = new Date();
         await link.save();
 
-        // REDIRECT TO ORIGINAL LONG URL
+        // 🔥 5. Redirect
         res.redirect(link.longUrl);
 
     } catch (error) {
